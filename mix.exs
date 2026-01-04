@@ -63,6 +63,7 @@ defmodule AtmosphericHoover.MixProject do
       {:req, "~> 0.5"},
       {:websockex, "~> 0.4.3"},
       {:cbor, "~> 1.0"},
+      {:broadway, "~> 1.1"},
       {:telemetry_metrics, "~> 1.0"},
       {:telemetry_poller, "~> 1.0"},
       {:gettext, "~> 1.0"},

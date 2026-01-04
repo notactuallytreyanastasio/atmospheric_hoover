@@ -2,16 +2,21 @@ defmodule AtmosphericHoover.Bluesky.Supervisor do
   @moduledoc """
   Supervisor for the Bluesky firehose subsystem.
 
-  This supervisor manages the firehose WebSocket connection and ensures
-  it's restarted if it crashes. Uses a `:rest_for_one` strategy to allow
-  for future dependent workers.
+  This supervisor manages the Broadway pipelines and WebSocket connection,
+  ensuring proper startup order and restart behavior.
 
   ## Architecture
 
   ```
   AtmosphericHoover.Bluesky.Supervisor
-  └── AtmosphericHoover.Bluesky.Firehose (WebSocket client)
+  ├── EventPipeline (Broadway - event processing)
+  ├── ProfilePipeline (Broadway - profile fetching)
+  └── Firehose (WebSocket client)
   ```
+
+  The startup order ensures:
+  1. Broadway pipelines start first (to receive events)
+  2. Firehose starts last (and immediately begins pushing events)
 
   ## Configuration
 
@@ -43,13 +48,16 @@ defmodule AtmosphericHoover.Bluesky.Supervisor do
 
   ## Child Processes
 
-  * `AtmosphericHoover.Bluesky.Firehose` - The WebSocket client that connects
-    to the Bluesky Jetstream and processes incoming events.
+  * `EventPipeline` - Broadway pipeline for parsing, persisting, and broadcasting events
+  * `ProfilePipeline` - Broadway pipeline for fetching user profiles with ETS dedup
+  * `Firehose` - WebSocket client that pushes events to the pipelines
   """
 
   use Supervisor
 
   require Logger
+
+  alias AtmosphericHoover.Bluesky.{EventPipeline, ProfilePipeline, Firehose}
 
   @doc """
   Starts the Bluesky supervisor.
@@ -58,13 +66,18 @@ defmodule AtmosphericHoover.Bluesky.Supervisor do
 
   * `:name` - Process name (default: `__MODULE__`)
   * `:firehose_opts` - Options passed to the Firehose worker
+  * `:event_pipeline_opts` - Options passed to EventPipeline
+  * `:profile_pipeline_opts` - Options passed to ProfilePipeline
 
   ## Examples
 
       {:ok, pid} = Supervisor.start_link([])
 
-      # With custom firehose options
-      {:ok, pid} = Supervisor.start_link(firehose_opts: [persist: false])
+      # With custom options
+      {:ok, pid} = Supervisor.start_link(
+        firehose_opts: [sample_rate: 0.5],
+        event_pipeline_opts: [processor_concurrency: 10]
+      )
   """
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts) do
@@ -75,17 +88,28 @@ defmodule AtmosphericHoover.Bluesky.Supervisor do
   @impl Supervisor
   def init(opts) do
     if enabled?() do
-      Logger.info("Starting Bluesky Supervisor")
+      Logger.info("Starting Bluesky Supervisor with Broadway pipelines")
 
       firehose_opts = opts[:firehose_opts] || []
+      event_pipeline_opts = opts[:event_pipeline_opts] || []
+      profile_pipeline_opts = opts[:profile_pipeline_opts] || []
 
       children = [
-        {AtmosphericHoover.Bluesky.Firehose, firehose_opts}
+        # Task supervisor for async operations
+        {Task.Supervisor, name: AtmosphericHoover.Bluesky.TaskSupervisor},
+
+        # Start Broadway pipelines first
+        {EventPipeline, event_pipeline_opts},
+        {ProfilePipeline, profile_pipeline_opts},
+
+        # Start firehose last (it will push to EventPipeline)
+        {Firehose, firehose_opts}
       ]
 
+      # Use rest_for_one so if a pipeline crashes, firehose restarts too
       Supervisor.init(children, strategy: :rest_for_one)
     else
-      Logger.info("Bluesky Supervisor disabled, not starting firehose")
+      Logger.info("Bluesky Supervisor disabled, not starting pipelines")
       :ignore
     end
   end

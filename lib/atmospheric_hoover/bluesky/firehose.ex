@@ -3,16 +3,21 @@ defmodule AtmosphericHoover.Bluesky.Firehose do
   WebSocket client for consuming the Bluesky Jetstream firehose.
 
   This GenServer uses WebSockex to maintain a persistent connection to the
-  Bluesky Jetstream WebSocket endpoint and processes incoming events.
+  Bluesky Jetstream WebSocket endpoint and pushes events to Broadway pipelines.
 
   ## Architecture
 
-  The Firehose follows a functional core/imperative shell pattern:
+  The Firehose follows a producer pattern, pushing events to Broadway:
 
-  1. **WebSockex callbacks** handle connection lifecycle
-  2. **Parser module** transforms raw JSON to typed structs
-  3. **Database persistence** stores events via Ecto
-  4. **PubSub broadcasting** notifies LiveViews of new events
+  ```
+  Jetstream WebSocket
+      ↓
+  Firehose (WebSockex client)
+      ↓ push raw JSON (demand-driven via Broadway)
+  EventPipeline (Broadway)
+      ↓
+  ProfilePipeline (Broadway)
+  ```
 
   ## Configuration
 
@@ -26,13 +31,11 @@ defmodule AtmosphericHoover.Bluesky.Firehose do
   ## Sampling
 
   The firehose can process millions of events per hour. Use `sample_rate` to
-  control the percentage of events processed:
+  control the percentage of events pushed to the pipeline:
 
   * `1.0` - Process 100% of events (full firehose)
   * `0.1` - Process 10% of events (default for dev)
   * `0.01` - Process 1% of events
-
-  Events are sampled randomly using `:rand.uniform/0`.
 
   ## Collections
 
@@ -52,21 +55,6 @@ defmodule AtmosphericHoover.Bluesky.Firehose do
         AtmosphericHoover.Bluesky.Supervisor
       ]
 
-  Or start manually for testing:
-
-      {:ok, pid} = AtmosphericHoover.Bluesky.Firehose.start_link([])
-
-  ## Events
-
-  New events are broadcast on the PubSub topic `"firehose:events"`:
-
-      Phoenix.PubSub.subscribe(AtmosphericHoover.PubSub, "firehose:events")
-
-      # Receive events
-      def handle_info({:firehose_event, event}, socket) do
-        # Handle the event
-      end
-
   ## Statistics
 
   Use `get_stats/1` to see throughput metrics:
@@ -74,7 +62,7 @@ defmodule AtmosphericHoover.Bluesky.Firehose do
       Firehose.get_stats()
       # => %{
       #   messages_received: 10000,
-      #   events_processed: 1000,
+      #   events_pushed: 1000,
       #   sample_rate: 0.1,
       #   messages_per_second: 450.5,
       #   ...
@@ -85,8 +73,7 @@ defmodule AtmosphericHoover.Bluesky.Firehose do
 
   require Logger
 
-  alias AtmosphericHoover.Bluesky.{FirehoseEvent, Parser}
-  alias AtmosphericHoover.Repo
+  alias AtmosphericHoover.Bluesky.EventPipeline
 
   @default_url "wss://jetstream2.us-east.bsky.network/subscribe"
   @default_collections [
@@ -104,12 +91,11 @@ defmodule AtmosphericHoover.Bluesky.Firehose do
           collections: [String.t()],
           sample_rate: float(),
           messages_received: non_neg_integer(),
-          events_processed: non_neg_integer(),
+          events_pushed: non_neg_integer(),
           events_skipped: non_neg_integer(),
           started_at: DateTime.t(),
           last_event_at: DateTime.t() | nil,
-          persist: boolean(),
-          broadcast: boolean()
+          pipeline: GenServer.server()
         }
 
   # ---------------------------------------------------------------------------
@@ -124,8 +110,7 @@ defmodule AtmosphericHoover.Bluesky.Firehose do
   * `:url` - WebSocket URL (default: Jetstream US East)
   * `:collections` - List of collections to subscribe to
   * `:sample_rate` - Float 0.0-1.0, percentage of events to process (default: 0.1)
-  * `:persist` - Whether to persist events to database (default: true)
-  * `:broadcast` - Whether to broadcast events via PubSub (default: true)
+  * `:pipeline` - EventPipeline to push events to (default: EventPipeline)
   * `:name` - Process name (default: `__MODULE__`)
 
   ## Examples
@@ -136,9 +121,6 @@ defmodule AtmosphericHoover.Bluesky.Firehose do
       # Start with custom collections and 50% sampling
       {:ok, pid} = Firehose.start_link(collections: ["app.bsky.feed.post"], sample_rate: 0.5)
 
-      # Start without persistence (useful for testing)
-      {:ok, pid} = Firehose.start_link(persist: false)
-
       # Full firehose (100% of events)
       {:ok, pid} = Firehose.start_link(sample_rate: 1.0)
   """
@@ -147,8 +129,7 @@ defmodule AtmosphericHoover.Bluesky.Firehose do
     url = opts[:url] || config(:url, @default_url)
     collections = opts[:collections] || config(:collections, @default_collections)
     sample_rate = opts[:sample_rate] || config(:sample_rate, @default_sample_rate)
-    persist = Keyword.get(opts, :persist, true)
-    broadcast = Keyword.get(opts, :broadcast, true)
+    pipeline = opts[:pipeline] || EventPipeline
     name = opts[:name] || __MODULE__
 
     full_url = build_url(url, collections)
@@ -158,12 +139,11 @@ defmodule AtmosphericHoover.Bluesky.Firehose do
       collections: collections,
       sample_rate: sample_rate,
       messages_received: 0,
-      events_processed: 0,
+      events_pushed: 0,
       events_skipped: 0,
       started_at: DateTime.utc_now(),
       last_event_at: nil,
-      persist: persist,
-      broadcast: broadcast
+      pipeline: pipeline
     }
 
     Logger.info("Starting Bluesky firehose connection to #{url}")
@@ -180,13 +160,13 @@ defmodule AtmosphericHoover.Bluesky.Firehose do
 
   A map containing:
   * `:messages_received` - Total messages received from WebSocket
-  * `:events_processed` - Events that passed sampling and were processed
+  * `:events_pushed` - Events pushed to the pipeline
   * `:events_skipped` - Events skipped due to sampling
   * `:sample_rate` - Current sample rate (0.0-1.0)
-  * `:effective_rate` - Actual processing rate (processed/received)
+  * `:effective_rate` - Actual processing rate (pushed/received)
   * `:messages_per_second` - Average throughput since start
   * `:uptime_seconds` - Seconds since connection started
-  * `:last_event_at` - Timestamp of last processed event
+  * `:last_event_at` - Timestamp of last pushed event
   * `:collections` - Subscribed collections
 
   ## Examples
@@ -194,7 +174,7 @@ defmodule AtmosphericHoover.Bluesky.Firehose do
       iex> Firehose.get_stats()
       %{
         messages_received: 10000,
-        events_processed: 1000,
+        events_pushed: 1000,
         events_skipped: 9000,
         sample_rate: 0.1,
         effective_rate: 0.1,
@@ -205,13 +185,22 @@ defmodule AtmosphericHoover.Bluesky.Firehose do
   """
   @spec get_stats(GenServer.server()) :: map()
   def get_stats(server \\ __MODULE__) do
-    WebSockex.cast(server, {:get_stats, self()})
+    # Use supervised Task for proper fault tolerance
+    task = Task.Supervisor.async(
+      AtmosphericHoover.Bluesky.TaskSupervisor,
+      fn ->
+        ref = make_ref()
+        WebSockex.cast(server, {:get_stats, self(), ref})
 
-    receive do
-      {:stats, stats} -> stats
-    after
-      5000 -> %{error: :timeout}
-    end
+        receive do
+          {:stats, ^ref, stats} -> stats
+        after
+          5000 -> %{error: :timeout}
+        end
+      end
+    )
+
+    Task.await(task, 6000)
   end
 
   # ---------------------------------------------------------------------------
@@ -240,11 +229,37 @@ defmodule AtmosphericHoover.Bluesky.Firehose do
   def handle_frame({:text, msg}, state) do
     state = %{state | messages_received: state.messages_received + 1}
 
-    # Apply sampling - only process if random value is below sample rate
+    :telemetry.execute(
+      [:atmospheric_hoover, :firehose, :message, :received],
+      %{count: 1},
+      %{}
+    )
+
+    # Apply sampling - only push if random value is below sample rate
     if should_sample?(state.sample_rate) do
-      state = process_message(msg, state)
+      # Push raw JSON to the pipeline - let Broadway handle parsing
+      EventPipeline.push_event(state.pipeline, msg)
+
+      :telemetry.execute(
+        [:atmospheric_hoover, :firehose, :message, :pushed],
+        %{count: 1},
+        %{}
+      )
+
+      state = %{
+        state
+        | events_pushed: state.events_pushed + 1,
+          last_event_at: DateTime.utc_now()
+      }
+
       {:ok, state}
     else
+      :telemetry.execute(
+        [:atmospheric_hoover, :firehose, :message, :skipped],
+        %{count: 1},
+        %{reason: :sampling}
+      )
+
       {:ok, %{state | events_skipped: state.events_skipped + 1}}
     end
   end
@@ -256,9 +271,9 @@ defmodule AtmosphericHoover.Bluesky.Firehose do
   end
 
   @impl WebSockex
-  def handle_cast({:get_stats, from}, state) do
+  def handle_cast({:get_stats, from, ref}, state) do
     stats = build_stats(state)
-    send(from, {:stats, stats})
+    send(from, {:stats, ref, stats})
     {:ok, state}
   end
 
@@ -266,13 +281,31 @@ defmodule AtmosphericHoover.Bluesky.Firehose do
   def handle_info(:log_stats, state) do
     stats = build_stats(state)
 
-    Logger.info(
-      "Firehose stats: #{stats.messages_received} received, " <>
-        "#{stats.events_processed} processed (#{Float.round(stats.effective_rate * 100, 1)}%), " <>
-        "#{Float.round(stats.messages_per_second, 1)} msg/sec"
+    # Get pipeline queue depths safely
+    event_queue = safe_queue_depth(EventPipeline)
+    profile_stats = safe_profile_stats()
+
+    :telemetry.execute(
+      [:atmospheric_hoover, :firehose, :stats],
+      %{
+        messages_received: stats.messages_received,
+        events_pushed: stats.events_pushed,
+        events_skipped: stats.events_skipped,
+        messages_per_second: stats.messages_per_second,
+        effective_rate: stats.effective_rate,
+        event_queue_size: event_queue,
+        profile_queue_size: profile_stats[:queue_size] || 0
+      },
+      %{}
     )
 
-    # Schedule next stats log
+    Logger.info(
+      "Firehose stats: #{stats.messages_received} received, " <>
+        "#{stats.events_pushed} pushed (#{Float.round(stats.effective_rate * 100, 1)}%), " <>
+        "#{Float.round(stats.messages_per_second, 1)} msg/sec, " <>
+        "event_queue=#{event_queue}, profile_queue=#{profile_stats[:queue_size] || 0}"
+    )
+
     Process.send_after(self(), :log_stats, @stats_log_interval_ms)
     {:ok, state}
   end
@@ -289,7 +322,7 @@ defmodule AtmosphericHoover.Bluesky.Firehose do
 
     Logger.info(
       "Firehose terminating: #{inspect(reason)}, " <>
-        "processed #{stats.events_processed}/#{stats.messages_received} events " <>
+        "pushed #{stats.events_pushed}/#{stats.messages_received} events " <>
         "(#{Float.round(stats.effective_rate * 100, 1)}%)"
     )
 
@@ -341,14 +374,14 @@ defmodule AtmosphericHoover.Bluesky.Firehose do
 
     effective_rate =
       if state.messages_received > 0 do
-        state.events_processed / state.messages_received
+        state.events_pushed / state.messages_received
       else
         0.0
       end
 
     %{
       messages_received: state.messages_received,
-      events_processed: state.events_processed,
+      events_pushed: state.events_pushed,
       events_skipped: state.events_skipped,
       sample_rate: state.sample_rate,
       effective_rate: effective_rate,
@@ -360,53 +393,23 @@ defmodule AtmosphericHoover.Bluesky.Firehose do
     }
   end
 
-  defp process_message(msg, state) do
-    case Parser.parse_event(msg) do
-      {:ok, event} ->
-        handle_event(event, state)
-
-      {:error, reason} ->
-        Logger.warning("Failed to parse firehose event: #{inspect(reason)}")
-        state
+  defp safe_queue_depth(pipeline) do
+    try do
+      EventPipeline.queue_depth(pipeline)
+    rescue
+      _ -> 0
+    catch
+      :exit, _ -> 0
     end
   end
 
-  defp handle_event(event, state) do
-    # Persist to database if enabled
-    if state.persist do
-      persist_event(event)
+  defp safe_profile_stats do
+    try do
+      AtmosphericHoover.Bluesky.ProfilePipeline.get_stats()
+    rescue
+      _ -> %{}
+    catch
+      :exit, _ -> %{}
     end
-
-    # Broadcast via PubSub if enabled
-    if state.broadcast do
-      broadcast_event(event)
-    end
-
-    # Update stats
-    %{
-      state
-      | events_processed: state.events_processed + 1,
-        last_event_at: DateTime.utc_now()
-    }
-  end
-
-  defp persist_event(event) do
-    attrs = FirehoseEvent.from_event(event)
-
-    %FirehoseEvent{}
-    |> FirehoseEvent.changeset(attrs)
-    |> Repo.insert(on_conflict: :nothing)
-    |> case do
-      {:ok, _} -> :ok
-      {:error, changeset} -> Logger.debug("Failed to persist event: #{inspect(changeset.errors)}")
-    end
-  end
-
-  defp broadcast_event(event) do
-    Phoenix.PubSub.broadcast(
-      AtmosphericHoover.PubSub,
-      "firehose:events",
-      {:firehose_event, event}
-    )
   end
 end

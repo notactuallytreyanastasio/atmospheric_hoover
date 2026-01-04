@@ -197,6 +197,10 @@ defmodule AtmosphericHoover.Bluesky.FirehoseEvent do
   defp serialize_record(nil), do: nil
   defp serialize_record(record) when is_map(record), do: deep_serialize(record)
 
+  # DateTime must be matched BEFORE generic struct to avoid Map.from_struct
+  # converting it to a map with tuple fields that Jason can't encode
+  defp deep_serialize(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
+
   defp deep_serialize(%{__struct__: _} = struct) do
     struct
     |> Map.from_struct()
@@ -209,6 +213,5 @@ defmodule AtmosphericHoover.Bluesky.FirehoseEvent do
     Enum.map(list, &deep_serialize/1)
   end
 
-  defp deep_serialize(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
   defp deep_serialize(value), do: value
 end

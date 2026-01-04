@@ -18,6 +18,8 @@ defmodule AtmosphericHooverWeb.Router do
     pipe_through :browser
 
     get "/", PageController, :home
+    live "/grid", GridLive, :index
+    live "/firehose", FirehoseLive, :index
   end
 
   # Other scopes may use custom stacks.

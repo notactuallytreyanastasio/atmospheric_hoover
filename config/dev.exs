@@ -97,8 +97,8 @@ config :atmospheric_hoover, AtmosphericHoover.Bluesky.Supervisor, enabled: true
 
 config :atmospheric_hoover, AtmosphericHoover.Bluesky.Firehose,
   url: "wss://jetstream2.us-east.bsky.network/subscribe",
-  # Sample 10% of events (firehose is ~500+ events/sec)
-  sample_rate: 0.1,
+  # Full firehose - process 100% of events
+  sample_rate: 1.0,
   collections: [
     "app.bsky.feed.post",
     "app.bsky.feed.like",
