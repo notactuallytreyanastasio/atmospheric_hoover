@@ -45,7 +45,7 @@ defmodule AtmosphericHoover.Bluesky.EventPipeline do
   require Logger
 
   alias AtmosphericHoover.Bluesky.{FirehoseEvent, Parser}
-  alias AtmosphericHoover.Repo
+  alias AtmosphericHoover.{Clickhouse, Repo}
   alias Broadway.Message
 
   @default_processor_concurrency 5
@@ -225,6 +225,9 @@ defmodule AtmosphericHoover.Bluesky.EventPipeline do
       broadcast_batch(events)
     end
 
+    # Store in ClickHouse for analytics
+    store_in_clickhouse(events)
+
     # Emit DIDs for profile fetching
     emit_dids(events)
 
@@ -279,6 +282,89 @@ defmodule AtmosphericHoover.Bluesky.EventPipeline do
       )
     end)
   end
+
+  defp store_in_clickhouse([]), do: :ok
+
+  defp store_in_clickhouse(events) do
+    # Only store posts (not other event types) - batch insert directly
+    posts =
+      events
+      |> Enum.filter(&is_post?/1)
+      |> Enum.map(&event_to_clickhouse_post/1)
+
+    if posts != [] do
+      Clickhouse.insert_posts(posts)
+    end
+  end
+
+  defp is_post?(event) do
+    event.kind == :commit &&
+      event.commit &&
+      event.commit.collection == "app.bsky.feed.post" &&
+      event.commit.operation == :create &&
+      event.commit.record &&
+      event.commit.record.text
+  end
+
+  defp event_to_clickhouse_post(event) do
+    record = event.commit.record
+
+    %{
+      did: event.did,
+      handle: "",
+      display_name: "",
+      text: record.text || "",
+      langs: record.langs || [],
+      hashtags: extract_hashtags(record.facets),
+      cid: event.commit.cid || "",
+      uri: "at://#{event.did}/app.bsky.feed.post/#{event.commit.rkey}",
+      reply_parent: get_reply_parent(record),
+      reply_root: get_reply_root(record),
+      has_images: has_images?(record),
+      has_video: has_video?(record),
+      has_external_link: has_external_link?(record),
+      created_at: record.created_at
+    }
+  end
+
+  defp extract_hashtags(nil), do: []
+
+  defp extract_hashtags(facets) when is_list(facets) do
+    facets
+    |> Enum.flat_map(fn facet ->
+      case facet do
+        %{features: features} when is_list(features) -> features
+        _ -> []
+      end
+    end)
+    |> Enum.filter(fn f ->
+      case f do
+        %{type: :tag} -> true
+        _ -> false
+      end
+    end)
+    |> Enum.map(fn f -> Map.get(f, :tag) end)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.map(&String.downcase/1)
+  end
+
+  defp extract_hashtags(_), do: []
+
+  defp get_reply_parent(%{reply: %{parent: %{uri: uri}}}), do: uri
+  defp get_reply_parent(_), do: ""
+
+  defp get_reply_root(%{reply: %{root: %{uri: uri}}}), do: uri
+  defp get_reply_root(_), do: ""
+
+  defp has_images?(%{embed: %{type: :images}}), do: true
+  defp has_images?(%{embed: %{type: :record_with_media, media: %{type: :images}}}), do: true
+  defp has_images?(_), do: false
+
+  defp has_video?(%{embed: %{type: :video}}), do: true
+  defp has_video?(_), do: false
+
+  defp has_external_link?(%{embed: %{type: :external}}), do: true
+  defp has_external_link?(_), do: false
 
   defp emit_dids(events) do
     dids = Enum.map(events, & &1.did) |> Enum.uniq()

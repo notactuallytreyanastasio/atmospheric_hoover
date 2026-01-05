@@ -17,7 +17,7 @@ defmodule AtmosphericHooverWeb.Router do
   scope "/", AtmosphericHooverWeb do
     pipe_through :browser
 
-    get "/", PageController, :home
+    live "/", AnalyticsLive, :index
     live "/grid", GridLive, :index
     live "/firehose", FirehoseLive, :index
   end
