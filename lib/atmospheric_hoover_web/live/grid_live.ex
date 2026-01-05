@@ -246,14 +246,21 @@ defmodule AtmosphericHooverWeb.GridLive do
       post = build_post(event, user, slot)
       assign(socket, posts: Map.put(posts, slot, post))
     else
-      # Replace oldest post
-      {oldest_slot, _} =
-        posts
-        |> Enum.min_by(fn {_, p} -> p.added_at end)
+      # Replace oldest non-exiting post
+      non_exiting = Enum.reject(posts, fn {_, p} -> p.exiting end)
 
-      post = build_post(event, user, oldest_slot)
-      posts = Map.put(posts, oldest_slot, %{posts[oldest_slot] | exiting: true})
-      assign(socket, posts: Map.put(posts, oldest_slot, post))
+      if non_exiting != [] do
+        {oldest_slot, _} =
+          non_exiting
+          |> Enum.min_by(fn {_, p} -> p.added_at end)
+
+        # Just replace directly - the new post will animate in
+        post = build_post(event, user, oldest_slot)
+        assign(socket, posts: Map.put(posts, oldest_slot, post))
+      else
+        # All posts are exiting, skip this one
+        socket
+      end
     end
   end
 
@@ -405,10 +412,13 @@ defmodule AtmosphericHooverWeb.GridLive do
   end
 
   attr :post, :map, required: true
+  attr :slot, :integer, required: true
   defp post_card(assigns) do
     ~H"""
     <div
-      id={@post.id}
+      id={"post-card-#{@slot}"}
+      phx-hook="GridPostCard"
+      data-post-id={@post.id}
       class={[
         "absolute inset-0 bg-white dark:bg-gray-900 rounded-xl shadow-md border border-gray-200 dark:border-gray-800 overflow-hidden",
         if(@post.exiting, do: @post.exit_direction, else: @post.direction)
@@ -465,7 +475,7 @@ defmodule AtmosphericHooverWeb.GridLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <div class="h-screen flex flex-col bg-gray-50 dark:bg-gray-950">
+    <div id="grid-live-root" class="h-screen flex flex-col bg-gray-50 dark:bg-gray-950">
       <nav class="flex-shrink-0 bg-white/90 dark:bg-gray-900/90 backdrop-blur-sm border-b border-gray-200 dark:border-gray-800">
         <div class="px-4 py-3 flex items-center justify-between">
           <div class="flex items-center gap-4">
@@ -584,9 +594,9 @@ defmodule AtmosphericHooverWeb.GridLive do
       </div>
 
       <div class="flex-1 overflow-auto p-2 sm:p-4">
-        <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-4 gap-3">
-          <div :for={slot <- 0..(@grid_size - 1)} class="relative min-h-[180px]">
-            <.post_card :if={@posts[slot]} post={@posts[slot]} />
+        <div id="post-grid" class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-4 gap-3">
+          <div :for={slot <- 0..(@grid_size - 1)} id={"grid-slot-#{slot}"} class="relative min-h-[180px]">
+            <.post_card :if={@posts[slot]} post={@posts[slot]} slot={slot} />
             <div
               :if={!@posts[slot]}
               class="absolute inset-0 bg-gray-100/50 dark:bg-gray-900/30 rounded-xl border border-dashed border-gray-200 dark:border-gray-800"

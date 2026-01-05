@@ -1465,6 +1465,32 @@ const ThreadTreeChart = {
   }
 }
 
+// Grid post card animation handler - prevents animation restarts on content updates
+const GridPostCard = {
+  mounted() {
+    // Let the animation play once, then remove the class to prevent restarts
+    this.el.addEventListener('animationend', () => {
+      // Store that this slot has animated
+      this.el.dataset.animated = 'true'
+    }, { once: true })
+  },
+  updated() {
+    // If this card was already animated, prevent re-animation by removing animation class
+    // Only re-animate if it's actually a new post (different post id)
+    const currentPostId = this.el.dataset.postId
+    const previousPostId = this.el.dataset.previousPostId
+
+    if (currentPostId !== previousPostId) {
+      // New post in this slot - allow animation
+      this.el.dataset.previousPostId = currentPostId
+      this.el.dataset.animated = 'false'
+    } else if (this.el.dataset.animated === 'true') {
+      // Same post, already animated - remove animation to prevent restart
+      this.el.style.animation = 'none'
+    }
+  }
+}
+
 export default {
   PostsRateChart,
   LanguageChart,
@@ -1473,5 +1499,6 @@ export default {
   HashtagsChart,
   LiveRateChart,
   ThreadVelocityChart,
-  ThreadTreeChart
+  ThreadTreeChart,
+  GridPostCard
 }
