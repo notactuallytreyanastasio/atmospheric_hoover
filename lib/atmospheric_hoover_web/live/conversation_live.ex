@@ -12,7 +12,6 @@ defmodule AtmosphericHooverWeb.ConversationLive do
 
   @impl true
   def mount(_params, _session, socket) do
-    IO.inspect({:mount, connected?(socket)}, label: "MOUNT")
     if connected?(socket) do
       schedule_refresh()
       Phoenix.PubSub.subscribe(AtmosphericHoover.PubSub, "firehose:events")
@@ -78,7 +77,6 @@ defmodule AtmosphericHooverWeb.ConversationLive do
   def handle_event("select_thread", %{"uri" => uri}, socket) do
     # Store the thread data with the URI for robustness
     thread = find_thread(socket.assigns.hot_threads, uri) || %{"reply_root" => uri}
-    IO.inspect({:select_thread, uri, thread}, label: "SELECT_THREAD")
 
     {:noreply,
      socket
@@ -107,7 +105,6 @@ defmodule AtmosphericHooverWeb.ConversationLive do
 
   @impl true
   def handle_async(:load_thread, {:ok, {posts, velocity}}, socket) do
-    IO.inspect({:async_success, length(posts), length(velocity)}, label: "ASYNC_LOAD")
     {:noreply,
      socket
      |> assign(thread_posts: posts, thread_velocity: velocity, thread_loading: false)
@@ -115,8 +112,7 @@ defmodule AtmosphericHooverWeb.ConversationLive do
      |> push_event("update-thread-velocity", %{points: velocity})}
   end
 
-  def handle_async(:load_thread, {:exit, reason}, socket) do
-    IO.inspect({:async_exit, reason}, label: "ASYNC_EXIT")
+  def handle_async(:load_thread, {:exit, _reason}, socket) do
     {:noreply, assign(socket, thread_posts: [], thread_velocity: [], thread_loading: false)}
   end
 
