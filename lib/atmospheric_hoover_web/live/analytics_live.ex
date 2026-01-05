@@ -237,6 +237,9 @@ defmodule AtmosphericHooverWeb.AnalyticsLive do
               <.link navigate={~p"/grid"} class="text-sm text-gray-400 hover:text-white transition-colors">
                 Grid View
               </.link>
+              <.link navigate={~p"/conversations"} class="text-sm text-gray-400 hover:text-white transition-colors">
+                Conversations
+              </.link>
               <.link navigate={~p"/firehose"} class="text-sm text-gray-400 hover:text-white transition-colors">
                 Raw Firehose
               </.link>

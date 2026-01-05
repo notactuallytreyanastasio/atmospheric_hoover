@@ -20,6 +20,7 @@ defmodule AtmosphericHooverWeb.Router do
     live "/", AnalyticsLive, :index
     live "/grid", GridLive, :index
     live "/firehose", FirehoseLive, :index
+    live "/conversations", ConversationLive, :index
   end
 
   # Other scopes may use custom stacks.

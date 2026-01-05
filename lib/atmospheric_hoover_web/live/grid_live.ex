@@ -26,8 +26,11 @@ defmodule AtmosphericHooverWeb.GridLive do
   def mount(_params, _session, socket) do
     if connected?(socket) do
       Phoenix.PubSub.subscribe(AtmosphericHoover.PubSub, "firehose:events")
-      :timer.send_interval(100, :check_expired)
+      # Check expired posts less frequently to reduce DOM updates
+      :timer.send_interval(500, :check_expired)
       :timer.send_interval(@pending_check_interval_ms, :check_pending)
+      # Update stats display periodically instead of on every event
+      :timer.send_interval(1000, :update_stats_display)
     end
 
     {:ok,
@@ -36,6 +39,7 @@ defmodule AtmosphericHooverWeb.GridLive do
        posts: %{},
        pending_posts: [],
        stats: %{received: 0, displayed: 0, pending: 0},
+       stats_display: %{received: 0, displayed: 0, pending: 0},
        grid_size: @grid_size,
        filters: %{
          text: "",
@@ -141,6 +145,10 @@ defmodule AtmosphericHooverWeb.GridLive do
       |> Map.new()
 
     {:noreply, assign(socket, posts: posts)}
+  end
+
+  def handle_info(:update_stats_display, socket) do
+    {:noreply, assign(socket, stats_display: socket.assigns.stats)}
   end
 
   def handle_info(_msg, socket), do: {:noreply, socket}
@@ -464,6 +472,9 @@ defmodule AtmosphericHooverWeb.GridLive do
             <.link navigate={~p"/"} class="text-xl font-bold text-blue-500 hover:text-blue-600">
               Bluesky Grid
             </.link>
+            <.link navigate={~p"/conversations"} class="text-sm text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200">
+              Conversations
+            </.link>
             <.link navigate={~p"/firehose"} class="text-sm text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200">
               Raw Firehose →
             </.link>
@@ -488,8 +499,8 @@ defmodule AtmosphericHooverWeb.GridLive do
                 {active_filter_count(@filters)}
               </span>
             </button>
-            <span><span class="font-mono">{@stats.displayed}</span> shown</span>
-            <span><span class="font-mono">{@stats.pending}</span> pending</span>
+            <span><span class="font-mono">{@stats_display.displayed}</span> shown</span>
+            <span><span class="font-mono">{@stats_display.pending}</span> pending</span>
           </div>
         </div>
       </nav>

@@ -163,6 +163,74 @@ defmodule AtmosphericHoover.Clickhouse do
   end
 
   @doc """
+  Get hottest threads (most replies) in the last N minutes.
+  """
+  def hot_threads(minutes \\ 30, limit \\ 20) do
+    query("""
+    SELECT
+      reply_root,
+      count() as reply_count,
+      min(created_at) as first_reply,
+      max(created_at) as last_reply,
+      uniq(did) as unique_repliers
+    FROM posts
+    WHERE reply_root != ''
+      AND created_at >= now() - INTERVAL #{minutes} MINUTE
+    GROUP BY reply_root
+    ORDER BY reply_count DESC
+    LIMIT #{limit}
+    """)
+  end
+
+  @doc """
+  Get all posts in a thread (by reply_root URI).
+  """
+  def thread_posts(reply_root_uri) do
+    query("""
+    SELECT
+      uri,
+      did,
+      text,
+      reply_parent,
+      reply_root,
+      created_at,
+      has_images,
+      has_video
+    FROM posts
+    WHERE reply_root = '#{escape(reply_root_uri)}'
+       OR uri = '#{escape(reply_root_uri)}'
+    ORDER BY created_at ASC
+    """)
+  end
+
+  @doc """
+  Get thread velocity - replies per minute over time.
+  """
+  def thread_velocity(reply_root_uri, minutes \\ 60) do
+    query("""
+    SELECT
+      toStartOfMinute(created_at) as minute,
+      count() as replies
+    FROM posts
+    WHERE reply_root = '#{escape(reply_root_uri)}'
+      AND created_at >= now() - INTERVAL #{minutes} MINUTE
+    GROUP BY minute
+    ORDER BY minute
+    """)
+  end
+
+  @doc """
+  Get a single post by URI.
+  """
+  def get_post(uri) do
+    case query("SELECT * FROM posts WHERE uri = '#{escape(uri)}' LIMIT 1") do
+      {:ok, [post]} -> {:ok, post}
+      {:ok, []} -> {:error, :not_found}
+      error -> error
+    end
+  end
+
+  @doc """
   Backfill posts from PostgreSQL firehose_events table.
   """
   def backfill_from_postgres(batch_size \\ 10_000) do
@@ -218,11 +286,22 @@ defmodule AtmosphericHoover.Clickhouse do
   # Private functions
 
   defp post_to_row(post) do
-    # Format created_at for ClickHouse DateTime64(3) - ISO8601 format
+    # Format created_at for ClickHouse DateTime64(3) - needs format: "2024-01-01 12:00:00.000"
     created_at = case post[:created_at] do
-      %DateTime{} = dt -> DateTime.to_iso8601(dt)
+      %DateTime{} = dt ->
+        # Format as "YYYY-MM-DD HH:MM:SS.mmm" for ClickHouse
+        Calendar.strftime(dt, "%Y-%m-%d %H:%M:%S") <>
+          ".#{String.pad_leading(Integer.to_string(div(dt.microsecond |> elem(0), 1000)), 3, "0")}"
       nil -> nil
-      other -> other
+      str when is_binary(str) ->
+        # Parse ISO8601 string and reformat for ClickHouse
+        case DateTime.from_iso8601(str) do
+          {:ok, dt, _} ->
+            Calendar.strftime(dt, "%Y-%m-%d %H:%M:%S") <>
+              ".#{String.pad_leading(Integer.to_string(div(dt.microsecond |> elem(0), 1000)), 3, "0")}"
+          _ -> nil
+        end
+      _ -> nil
     end
 
     row = %{
